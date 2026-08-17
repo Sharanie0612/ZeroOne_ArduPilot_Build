@@ -1,5 +1,5 @@
 name: ArduPilot Cloud Build
-run-name: ${{ inputs.board }}_${{ inputs.vehicle }}_${{ inputs.build_date }} · ${{ inputs.source_ref }} · ${{ inputs.requester }}
+run-name: '[${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}] ${{ inputs.build_date }} · ${{ inputs.requester }}'
 
 on:
   workflow_dispatch:
@@ -8,6 +8,11 @@ on:
         description: ArduPilot source branch or tag
         required: true
         default: master
+        type: string
+      source_sha:
+        description: Exact ArduPilot source commit (set by the desktop app)
+        required: false
+        default: ''
         type: string
       vehicle:
         description: Vehicle firmware
@@ -22,9 +27,9 @@ on:
           - antennatracker
           - blimp
       board:
-        description: Hardware board name (for example CubeOrange)
+        description: ZeroOne hardware board name
         required: true
-        default: CubeOrange
+        default: ZeroOneX6
         type: string
       build_date:
         description: Requirement date (YYYY-MM-DD)
@@ -44,7 +49,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ardupilot-${{ inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}
+  group: ardupilot-${{ inputs.source_sha || inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}
   cancel-in-progress: false
 
 jobs:
@@ -58,6 +63,7 @@ jobs:
           BOARD: ${{ inputs.board }}
           BUILD_DATE: ${{ inputs.build_date }}
           SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           if [[ ! "$BOARD" =~ ^[A-Za-z0-9._+-]+$ ]]; then
             echo "Invalid board name: $BOARD" >&2
@@ -71,12 +77,20 @@ jobs:
             echo "Invalid source ref: $SOURCE_REF" >&2
             exit 2
           fi
+          if [[ -n "$SOURCE_SHA" && ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Invalid source SHA: $SOURCE_SHA" >&2
+            exit 2
+          fi
+          case "$BOARD" in
+            ZeroOneX6|ZeroOneX6_Air|ZeroOneX6-ODID) ;;
+            *) echo "Unsupported ZeroOne board: $BOARD" >&2; exit 2 ;;
+          esac
 
       - name: Check out ArduPilot
         uses: actions/checkout@v4
         with:
           repository: Sharanie0612/ardupilot
-          ref: ${{ inputs.source_ref }}
+          ref: ${{ inputs.source_sha || inputs.source_ref }}
           submodules: recursive
           fetch-depth: 0
 
