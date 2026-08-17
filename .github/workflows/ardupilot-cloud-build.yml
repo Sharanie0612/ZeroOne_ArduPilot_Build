@@ -83,7 +83,7 @@ jobs:
           BOARD_PACKAGE_B64: ${{ inputs.board_package_b64 }}
           BOARD_PACKAGE_SHA: ${{ inputs.board_package_sha }}
         run: |
-          if [[ ! "$BOARD" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+          if [[ ! "$BOARD" =~ ^ZeroOne[A-Za-z0-9._+-]{1,72}$ ]]; then
             echo "Invalid board name: $BOARD" >&2
             exit 2
           fi
@@ -111,10 +111,12 @@ jobs:
             echo "Board package content is missing" >&2
             exit 2
           fi
-          case "$BOARD" in
-            ZeroOneX6|ZeroOneX6_Air|ZeroOneX6-ODID) ;;
-            *) echo "Unsupported ZeroOne board: $BOARD" >&2; exit 2 ;;
-          esac
+          if [[ -z "$BOARD_PACKAGE_B64" ]]; then
+            case "$BOARD" in
+              ZeroOneX6|ZeroOneX6_Air|ZeroOneX6-ODID) ;;
+              *) echo "A custom ZeroOne board requires a Beta board package: $BOARD" >&2; exit 2 ;;
+            esac
+          fi
 
       - name: Check out ArduPilot
         uses: actions/checkout@v4
