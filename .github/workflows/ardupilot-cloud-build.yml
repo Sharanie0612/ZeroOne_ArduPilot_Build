@@ -1,0 +1,194 @@
+name: ArduPilot Cloud Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: ArduPilot source branch or tag
+        required: true
+        default: master
+        type: string
+      vehicle:
+        description: Vehicle firmware
+        required: true
+        default: copter
+        type: choice
+        options:
+          - copter
+          - plane
+          - rover
+          - sub
+          - antennatracker
+          - blimp
+      board:
+        description: Hardware board name (for example CubeOrange)
+        required: true
+        default: CubeOrange
+        type: string
+      build_date:
+        description: Requirement date (YYYY-MM-DD)
+        required: true
+        type: string
+      requester:
+        description: Requester name
+        required: true
+        type: string
+      clean:
+        description: Clean the build directory first
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ardupilot-${{ inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board }}
+          BUILD_DATE: ${{ inputs.build_date }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          if [[ ! "$BOARD" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+            echo "Invalid board name: $BOARD" >&2
+            exit 2
+          fi
+          if [[ ! "$BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+            echo "Invalid build date: $BUILD_DATE" >&2
+            exit 2
+          fi
+          if [[ ! "$SOURCE_REF" =~ ^[A-Za-z0-9][A-Za-z0-9._/+-]{0,199}$ ]]; then
+            echo "Invalid source ref: $SOURCE_REF" >&2
+            exit 2
+          fi
+
+      - name: Check out ArduPilot
+        uses: actions/checkout@v4
+        with:
+          repository: Sharanie0612/ardupilot
+          ref: ${{ inputs.source_ref }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Cache compiler downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            ~/opt
+          key: ardupilot-toolchain-${{ runner.os }}-${{ hashFiles('Tools/environment_install/install-prereqs-ubuntu.sh') }}
+          restore-keys: |
+            ardupilot-toolchain-${{ runner.os }}-
+
+      - name: Install build prerequisites
+        shell: bash
+        run: |
+          Tools/environment_install/install-prereqs-ubuntu.sh -y
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/opt/gcc-arm-none-eabi-10-2020-q4-major/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board }}
+          CLEAN: ${{ inputs.clean }}
+        run: |
+          source ~/.profile || true
+          if [[ "$CLEAN" == "true" ]]; then
+            ./waf clean
+          fi
+          ./waf configure --board "$BOARD"
+
+      - name: Compile firmware
+        shell: bash
+        env:
+          VEHICLE: ${{ inputs.vehicle }}
+        run: |
+          source ~/.profile || true
+          ./waf "$VEHICLE"
+
+      - name: Write build manifest
+        if: always()
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board }}
+          VEHICLE: ${{ inputs.vehicle }}
+          BUILD_DATE: ${{ inputs.build_date }}
+          REQUESTER: ${{ inputs.requester }}
+          SOURCE_REPOSITORY: Sharanie0612/ardupilot
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          mkdir -p "build/$BOARD"
+          {
+            echo "repository=${SOURCE_REPOSITORY}"
+            echo "commit=$(git rev-parse HEAD)"
+            echo "ref=${SOURCE_REF}"
+            echo "vehicle=${VEHICLE}"
+            echo "board=${BOARD}"
+            echo "date=${BUILD_DATE}"
+            echo "requester=${REQUESTER}"
+            echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "build/$BOARD/build-info.txt"
+
+      - name: Upload firmware
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.board }}_${{ inputs.vehicle }}_${{ inputs.build_date }}
+          path: |
+            build/${{ inputs.board }}/bin/**
+            build/${{ inputs.board }}/build-info.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Notify Feishu
+        if: always()
+        shell: bash
+        env:
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          FEISHU_SIGNING_SECRET: ${{ secrets.FEISHU_SIGNING_SECRET }}
+          BUILD_STATUS: ${{ job.status }}
+          BOARD: ${{ inputs.board }}
+          VEHICLE: ${{ inputs.vehicle }}
+          BUILD_DATE: ${{ inputs.build_date }}
+          REQUESTER: ${{ inputs.requester }}
+        run: |
+          if [[ -z "$FEISHU_WEBHOOK_URL" ]]; then
+            echo "FEISHU_WEBHOOK_URL is not configured; skipping notification."
+            exit 0
+          fi
+          python3 - <<'PY'
+          import base64, hashlib, hmac, json, os, time, urllib.request
+
+          status = "成功" if os.environ["BUILD_STATUS"] == "success" else "失败"
+          text = (
+              f"ArduPilot 固件编译{status}\n"
+              f"需求人：{os.environ['REQUESTER']}\n"
+              f"固件：{os.environ['BOARD']}_{os.environ['VEHICLE']}_{os.environ['BUILD_DATE']}\n"
+              f"日志：{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          )
+          payload = {"msg_type": "text", "content": {"text": text}}
+          secret = os.environ.get("FEISHU_SIGNING_SECRET", "")
+          if secret:
+              timestamp = str(int(time.time()))
+              key = f"{timestamp}\n{secret}".encode()
+              payload.update(timestamp=timestamp, sign=base64.b64encode(hmac.new(key, digestmod=hashlib.sha256).digest()).decode())
+          request = urllib.request.Request(
+              os.environ["FEISHU_WEBHOOK_URL"],
+              data=json.dumps(payload, ensure_ascii=False).encode(),
+              headers={"Content-Type": "application/json"},
+          )
+          with urllib.request.urlopen(request, timeout=15) as response:
+              result = json.load(response)
+          if result.get("code", result.get("StatusCode", 0)) != 0:
+              raise RuntimeError(result)
+          PY
