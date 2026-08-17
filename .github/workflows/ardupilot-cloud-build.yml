@@ -1,5 +1,5 @@
 name: ArduPilot Cloud Build
-run-name: '[${{ inputs.source_repository }}|${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}] ${{ inputs.build_date }} · ${{ inputs.requester }}'
+run-name: "[${{ inputs.source_repository }}|${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}|${{ inputs.board_package_sha || 'base' }}] ${{ inputs.build_date }} · ${{ inputs.requester }}"
 
 on:
   workflow_dispatch:
@@ -49,12 +49,22 @@ on:
         required: true
         default: false
         type: boolean
+      board_package_b64:
+        description: Beta hwdef ZIP encoded as base64 (set by OneIDE)
+        required: false
+        default: ''
+        type: string
+      board_package_sha:
+        description: SHA256 of the normalized Beta hwdef ZIP
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: ardupilot-${{ inputs.source_repository }}-${{ inputs.source_sha || inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}
+  group: ardupilot-${{ inputs.source_repository }}-${{ inputs.source_sha || inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}-${{ inputs.board_package_sha || 'base' }}
   cancel-in-progress: false
 
 jobs:
@@ -70,6 +80,8 @@ jobs:
           SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          BOARD_PACKAGE_B64: ${{ inputs.board_package_b64 }}
+          BOARD_PACKAGE_SHA: ${{ inputs.board_package_sha }}
         run: |
           if [[ ! "$BOARD" =~ ^[A-Za-z0-9._+-]+$ ]]; then
             echo "Invalid board name: $BOARD" >&2
@@ -91,6 +103,14 @@ jobs:
             echo "Invalid source SHA: $SOURCE_SHA" >&2
             exit 2
           fi
+          if [[ -n "$BOARD_PACKAGE_B64" && ! "$BOARD_PACKAGE_SHA" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "A valid board package SHA is required with the Beta package" >&2
+            exit 2
+          fi
+          if [[ -z "$BOARD_PACKAGE_B64" && -n "$BOARD_PACKAGE_SHA" ]]; then
+            echo "Board package content is missing" >&2
+            exit 2
+          fi
           case "$BOARD" in
             ZeroOneX6|ZeroOneX6_Air|ZeroOneX6-ODID) ;;
             *) echo "Unsupported ZeroOne board: $BOARD" >&2; exit 2 ;;
@@ -104,6 +124,40 @@ jobs:
           submodules: recursive
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Inject Beta ZeroOne board package
+        if: ${{ inputs.board_package_b64 != '' }}
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board }}
+          BOARD_PACKAGE_B64: ${{ inputs.board_package_b64 }}
+          BOARD_PACKAGE_SHA: ${{ inputs.board_package_sha }}
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import base64, hashlib, io, os, pathlib, stat, zipfile
+
+          raw = base64.b64decode(os.environ["BOARD_PACKAGE_B64"], validate=True)
+          if len(raw) > 40 * 1024 or hashlib.sha256(raw).hexdigest() != os.environ["BOARD_PACKAGE_SHA"]:
+              raise SystemExit("Invalid Beta board package size or checksum")
+          board = os.environ["BOARD"]
+          destination = pathlib.Path("libraries/AP_HAL_ChibiOS/hwdef")
+          with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+              files = [item for item in archive.infolist() if not item.is_dir()]
+              if not files or len(files) > 40 or sum(item.file_size for item in files) > 1024 * 1024:
+                  raise SystemExit("Invalid Beta board package contents")
+              for item in files:
+                  parts = pathlib.PurePosixPath(item.filename).parts
+                  if not parts or parts[0] != board or any(part in {"", ".", ".."} for part in parts):
+                      raise SystemExit("Unsafe path in Beta board package")
+                  if stat.S_ISLNK(item.external_attr >> 16):
+                      raise SystemExit("Symlinks are not allowed in Beta board package")
+                  target = destination.joinpath(*parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_bytes(archive.read(item))
+          if not (destination / board / "hwdef.dat").is_file():
+              raise SystemExit("Beta board package does not contain hwdef.dat")
+          print(f"Injected Beta board package {os.environ['BOARD_PACKAGE_SHA'][:12]} for {board}")
+          PY
 
       - name: Cache compiler downloads
         uses: actions/cache@v4
@@ -152,6 +206,7 @@ jobs:
           REQUESTER: ${{ inputs.requester }}
           SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
+          BOARD_PACKAGE_SHA: ${{ inputs.board_package_sha }}
         run: |
           mkdir -p "build/$BOARD"
           {
@@ -162,6 +217,7 @@ jobs:
             echo "board=${BOARD}"
             echo "date=${BUILD_DATE}"
             echo "requester=${REQUESTER}"
+            echo "board_package_sha=${BOARD_PACKAGE_SHA:-base}"
             echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } > "build/$BOARD/build-info.txt"
 
