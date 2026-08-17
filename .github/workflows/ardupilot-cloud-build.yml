@@ -1,4 +1,5 @@
 name: ArduPilot Cloud Build
+run-name: ${{ inputs.board }}_${{ inputs.vehicle }}_${{ inputs.build_date }} · ${{ inputs.source_ref }} · ${{ inputs.requester }}
 
 on:
   workflow_dispatch:
