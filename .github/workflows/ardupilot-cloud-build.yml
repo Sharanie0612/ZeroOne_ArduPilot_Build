@@ -1,9 +1,14 @@
 name: ArduPilot Cloud Build
-run-name: '[${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}] ${{ inputs.build_date }} · ${{ inputs.requester }}'
+run-name: '[${{ inputs.source_repository }}|${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}] ${{ inputs.build_date }} · ${{ inputs.requester }}'
 
 on:
   workflow_dispatch:
     inputs:
+      source_repository:
+        description: Public GitHub source repository (owner/name)
+        required: true
+        default: Sharanie0612/ardupilot
+        type: string
       source_ref:
         description: ArduPilot source branch or tag
         required: true
@@ -49,7 +54,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ardupilot-${{ inputs.source_sha || inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}
+  group: ardupilot-${{ inputs.source_repository }}-${{ inputs.source_sha || inputs.source_ref }}-${{ inputs.vehicle }}-${{ inputs.board }}
   cancel-in-progress: false
 
 jobs:
@@ -62,6 +67,7 @@ jobs:
         env:
           BOARD: ${{ inputs.board }}
           BUILD_DATE: ${{ inputs.build_date }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -77,6 +83,10 @@ jobs:
             echo "Invalid source ref: $SOURCE_REF" >&2
             exit 2
           fi
+          if [[ ! "$SOURCE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "Invalid public GitHub source repository: $SOURCE_REPOSITORY" >&2
+            exit 2
+          fi
           if [[ -n "$SOURCE_SHA" && ! "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Invalid source SHA: $SOURCE_SHA" >&2
             exit 2
@@ -89,10 +99,11 @@ jobs:
       - name: Check out ArduPilot
         uses: actions/checkout@v4
         with:
-          repository: Sharanie0612/ardupilot
+          repository: ${{ inputs.source_repository }}
           ref: ${{ inputs.source_sha || inputs.source_ref }}
           submodules: recursive
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Cache compiler downloads
         uses: actions/cache@v4
@@ -100,9 +111,9 @@ jobs:
           path: |
             ~/.ccache
             ~/opt
-          key: ardupilot-toolchain-${{ runner.os }}-${{ hashFiles('Tools/environment_install/install-prereqs-ubuntu.sh') }}
+          key: ardupilot-toolchain-${{ inputs.source_repository }}-${{ runner.os }}-${{ hashFiles('Tools/environment_install/install-prereqs-ubuntu.sh') }}
           restore-keys: |
-            ardupilot-toolchain-${{ runner.os }}-
+            ardupilot-toolchain-${{ inputs.source_repository }}-${{ runner.os }}-
 
       - name: Install build prerequisites
         shell: bash
@@ -139,7 +150,7 @@ jobs:
           VEHICLE: ${{ inputs.vehicle }}
           BUILD_DATE: ${{ inputs.build_date }}
           REQUESTER: ${{ inputs.requester }}
-          SOURCE_REPOSITORY: Sharanie0612/ardupilot
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
         run: |
           mkdir -p "build/$BOARD"
@@ -165,13 +176,24 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  notify:
+    name: Notify Feishu from clean runner
+    needs: build
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
       - name: Notify Feishu
         if: always()
         shell: bash
         env:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           FEISHU_SIGNING_SECRET: ${{ secrets.FEISHU_SIGNING_SECRET }}
-          BUILD_STATUS: ${{ job.status }}
+          BUILD_STATUS: ${{ needs.build.result }}
+          SOURCE_REPOSITORY: ${{ inputs.source_repository }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
           BOARD: ${{ inputs.board }}
           VEHICLE: ${{ inputs.vehicle }}
           BUILD_DATE: ${{ inputs.build_date }}
@@ -181,13 +203,14 @@ jobs:
             echo "FEISHU_WEBHOOK_URL is not configured; skipping notification."
             exit 0
           fi
-          python3 - <<'PY'
+          /usr/bin/python3 - <<'PY'
           import base64, hashlib, hmac, json, os, time, urllib.request
 
           status = "成功" if os.environ["BUILD_STATUS"] == "success" else "失败"
           text = (
               f"ArduPilot 固件编译{status}\n"
               f"需求人：{os.environ['REQUESTER']}\n"
+              f"源码：{os.environ['SOURCE_REPOSITORY']} · {os.environ['SOURCE_REF']}@{os.environ['SOURCE_SHA'][:7]}\n"
               f"固件：{os.environ['BOARD']}_{os.environ['VEHICLE']}_{os.environ['BUILD_DATE']}\n"
               f"日志：{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           )
