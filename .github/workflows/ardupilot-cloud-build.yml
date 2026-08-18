@@ -193,27 +193,33 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
           echo "$HOME/opt/gcc-arm-none-eabi-10-2020-q4-major/bin" >> "$GITHUB_PATH"
 
-      - name: Configure
+      - name: Configure and compile firmware
         shell: bash
         env:
           BOARD: ${{ inputs.board }}
           CLEAN: ${{ inputs.clean }}
-        run: |
-          source ~/.profile || true
-          if [[ "$CLEAN" == "true" ]]; then
-            ./waf clean
-          fi
-          ./waf configure --board "$BOARD"
-
-      - name: Compile firmware
-        shell: bash
-        env:
           VEHICLE: ${{ inputs.vehicle }}
           CCACHE_MAXSIZE: 4G
           CCACHE_COMPRESS: "1"
         run: |
+          set -o pipefail
           source ~/.profile || true
-          ./waf "$VEHICLE" -j "$(nproc)"
+          if [[ "$CLEAN" == "true" ]]; then
+            rm -rf build
+          fi
+          ./waf configure --board "$BOARD"
+          set +e
+          ./waf "$VEHICLE" -j "$(nproc)" 2>&1 | tee /tmp/oneide-waf-build.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [[ $status -ne 0 ]] && grep -qi 'project was not configured' /tmp/oneide-waf-build.log; then
+            echo "Waf configuration state was lost; configuring once more before retry."
+            rm -rf build
+            ./waf configure --board "$BOARD"
+            ./waf "$VEHICLE" -j "$(nproc)"
+          elif [[ $status -ne 0 ]]; then
+            exit "$status"
+          fi
           ccache --show-stats || true
 
       - name: Write build manifest
@@ -277,6 +283,7 @@ jobs:
           VEHICLE: ${{ inputs.vehicle }}
           BUILD_DATE: ${{ inputs.build_date }}
           REQUESTER: ${{ inputs.requester }}
+          NOTE: ${{ inputs.note }}
           REQUESTER_OPEN_ID: ${{ inputs.requester_open_id }}
         run: |
           if [[ -z "$FEISHU_WEBHOOK_URL" ]]; then
@@ -292,12 +299,23 @@ jobs:
               f"需求人：{os.environ['REQUESTER']}\n"
               f"源码：{os.environ['SOURCE_REPOSITORY']} · {os.environ['SOURCE_REF']}@{os.environ['SOURCE_SHA'][:7]}\n"
               f"固件：{os.environ['BOARD']}_{os.environ['VEHICLE']}_{os.environ['BUILD_DATE']}\n"
+              f"备注：{os.environ.get('NOTE') or '标准固件'}\n"
               f"日志：{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           )
           open_id = os.environ.get("REQUESTER_OPEN_ID", "")
           if open_id:
-              text = f'<at user_id="{open_id}">{os.environ["REQUESTER"]}</at>\n{text}'
-          payload = {"msg_type": "text", "content": {"text": text}}
+              payload = {
+                  "msg_type": "post",
+                  "content": {"post": {"zh_cn": {
+                      "title": f"OneIDE 云工作台 · 编译{status}",
+                      "content": [[
+                          {"tag": "at", "user_id": open_id, "user_name": os.environ["REQUESTER"]},
+                          {"tag": "text", "text": f"\n{text}"},
+                      ]],
+                  }}},
+              }
+          else:
+              payload = {"msg_type": "text", "content": {"text": text}}
           secret = os.environ.get("FEISHU_SIGNING_SECRET", "")
           if secret:
               timestamp = str(int(time.time()))
