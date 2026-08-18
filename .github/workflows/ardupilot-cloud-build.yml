@@ -26,6 +26,7 @@ on:
         type: choice
         options:
           - copter
+          - heli
           - plane
           - rover
           - sub
@@ -43,6 +44,11 @@ on:
       requester:
         description: Requester name
         required: true
+        type: string
+      requester_open_id:
+        description: Feishu open_id used to mention the requester
+        required: false
+        default: ''
         type: string
       clean:
         description: Clean the build directory first
@@ -118,7 +124,7 @@ jobs:
           repository: ${{ inputs.source_repository }}
           ref: ${{ inputs.source_sha || inputs.source_ref }}
           submodules: recursive
-          fetch-depth: 0
+          fetch-depth: 1
           persist-credentials: false
 
       - name: Inject Beta ZeroOne board package
@@ -155,18 +161,28 @@ jobs:
           print(f"Injected Beta board package {os.environ['BOARD_PACKAGE_SHA'][:12]} for {board}")
           PY
 
-      - name: Cache compiler downloads
+      - name: Cache compiler toolchain
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.ccache
-            ~/opt
+          path: ~/opt
           key: ardupilot-toolchain-${{ inputs.source_repository }}-${{ runner.os }}-${{ hashFiles('Tools/environment_install/install-prereqs-ubuntu.sh') }}
           restore-keys: |
             ardupilot-toolchain-${{ inputs.source_repository }}-${{ runner.os }}-
 
+      - name: Cache compiled objects
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ardupilot-ccache-${{ runner.os }}-${{ inputs.source_repository }}-${{ inputs.board }}-${{ inputs.vehicle }}-${{ inputs.source_sha || inputs.source_ref }}
+          restore-keys: |
+            ardupilot-ccache-${{ runner.os }}-${{ inputs.source_repository }}-${{ inputs.board }}-${{ inputs.vehicle }}-
+            ardupilot-ccache-${{ runner.os }}-${{ inputs.source_repository }}-${{ inputs.board }}-
+
       - name: Install build prerequisites
         shell: bash
+        env:
+          CCACHE_MAXSIZE: 4G
+          CCACHE_COMPRESS: "1"
         run: |
           Tools/environment_install/install-prereqs-ubuntu.sh -y
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -188,9 +204,12 @@ jobs:
         shell: bash
         env:
           VEHICLE: ${{ inputs.vehicle }}
+          CCACHE_MAXSIZE: 4G
+          CCACHE_COMPRESS: "1"
         run: |
           source ~/.profile || true
-          ./waf "$VEHICLE"
+          ./waf "$VEHICLE" -j "$(nproc)"
+          ccache --show-stats || true
 
       - name: Write build manifest
         if: always()
@@ -200,6 +219,7 @@ jobs:
           VEHICLE: ${{ inputs.vehicle }}
           BUILD_DATE: ${{ inputs.build_date }}
           REQUESTER: ${{ inputs.requester }}
+          REQUESTER_OPEN_ID: ${{ inputs.requester_open_id }}
           SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
           BOARD_PACKAGE_SHA: ${{ inputs.board_package_sha }}
@@ -250,6 +270,7 @@ jobs:
           VEHICLE: ${{ inputs.vehicle }}
           BUILD_DATE: ${{ inputs.build_date }}
           REQUESTER: ${{ inputs.requester }}
+          REQUESTER_OPEN_ID: ${{ inputs.requester_open_id }}
         run: |
           if [[ -z "$FEISHU_WEBHOOK_URL" ]]; then
             echo "FEISHU_WEBHOOK_URL is not configured; skipping notification."
@@ -266,6 +287,9 @@ jobs:
               f"固件：{os.environ['BOARD']}_{os.environ['VEHICLE']}_{os.environ['BUILD_DATE']}\n"
               f"日志：{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           )
+          open_id = os.environ.get("REQUESTER_OPEN_ID", "")
+          if open_id:
+              text = f'<at user_id="{open_id}">{os.environ["REQUESTER"]}</at>\n{text}'
           payload = {"msg_type": "text", "content": {"text": text}}
           secret = os.environ.get("FEISHU_SIGNING_SECRET", "")
           if secret:
