@@ -1,5 +1,5 @@
 name: ArduPilot Cloud Build
-run-name: "[${{ inputs.source_repository }}|${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}|${{ inputs.board_package_sha || 'base' }}] ${{ inputs.build_date }} · ${{ inputs.requester }}"
+run-name: "[${{ inputs.source_repository }}|${{ inputs.board }}|${{ inputs.vehicle }}|${{ inputs.source_ref }}|${{ inputs.source_sha }}|${{ inputs.board_package_sha || 'base' }}] ${{ inputs.build_date }} · ${{ inputs.requester }} · ${{ inputs.note || '标准固件' }}"
 
 on:
   workflow_dispatch:
@@ -47,6 +47,11 @@ on:
         type: string
       requester_open_id:
         description: Feishu open_id used to mention the requester
+        required: false
+        default: ''
+        type: string
+      note:
+        description: Build note shown in OneIDE product tasks
         required: false
         default: ''
         type: string
@@ -219,6 +224,7 @@ jobs:
           VEHICLE: ${{ inputs.vehicle }}
           BUILD_DATE: ${{ inputs.build_date }}
           REQUESTER: ${{ inputs.requester }}
+          NOTE: ${{ inputs.note }}
           REQUESTER_OPEN_ID: ${{ inputs.requester_open_id }}
           SOURCE_REPOSITORY: ${{ inputs.source_repository }}
           SOURCE_REF: ${{ inputs.source_ref }}
@@ -233,6 +239,7 @@ jobs:
             echo "board=${BOARD}"
             echo "date=${BUILD_DATE}"
             echo "requester=${REQUESTER}"
+            echo "note=${NOTE}"
             echo "board_package_sha=${BOARD_PACKAGE_SHA:-base}"
             echo "run=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           } > "build/$BOARD/build-info.txt"
